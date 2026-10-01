@@ -127,4 +127,23 @@ public class BatchQuerySamples
 
         return options;
     }
+
+    public async Task count_and_page(ShopDbContext context, int customerId, int page, int pageSize)
+    {
+        #region sample_efcore_batch_query_count
+        await using var batch = context.CreateBatchQuery();
+
+        var orders = context.Orders.Where(o => o.CustomerId == customerId);
+
+        // QueryCount queues a COUNT(*) of the rows the query returns
+        var totalTask = batch.QueryCount(orders);
+        var pageTask = batch.Query(orders.OrderBy(o => o.Id).Skip((page - 1) * pageSize).Take(pageSize));
+
+        // The count and the page in one round trip
+        await batch.ExecuteAsync();
+
+        var total = await totalTask;
+        var currentPage = await pageTask;
+        #endregion
+    }
 }

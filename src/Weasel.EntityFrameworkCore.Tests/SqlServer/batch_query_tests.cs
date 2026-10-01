@@ -162,6 +162,26 @@ public class sql_server_batch_query_tests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task can_batch_a_count_and_a_page()
+    {
+        using var scope = _host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<SqlServerFkDbContext>();
+
+        await using var batch = context.CreateBatchQuery();
+
+        var active = context.Products.Where(p => p.IsActive);
+        var total = batch.QueryCount(active);
+        var page = batch.Query(active.OrderBy(p => p.Name).Skip(1).Take(1));
+        var none = batch.QueryCount(context.Products.Where(p => p.Price > 10_000m));
+
+        await batch.ExecuteAsync();
+
+        (await total).ShouldBe(3);
+        (await page).Single().Name.ShouldBe("Laptop"); // Coffee, Laptop, Phone
+        (await none).ShouldBe(0);
+    }
+
+    [Fact]
     public async Task empty_batch_does_not_throw()
     {
         using var scope = _host.Services.CreateScope();

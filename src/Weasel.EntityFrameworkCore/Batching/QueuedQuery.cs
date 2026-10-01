@@ -42,6 +42,25 @@ internal abstract class QueuedQuery
     public abstract Task ExecuteAsync(CancellationToken ct);
 
     public abstract void Fail(Exception exception);
+
+    /// <summary>The query's provider, after checking that the query is an EF Core query of this context.</summary>
+    public static IAsyncQueryProvider ProviderOf<T>(DbContext context, IQueryable<T> queryable)
+    {
+        if (queryable.Provider is not IAsyncQueryProvider provider)
+        {
+            throw new InvalidOperationException(
+                $"BatchedQuery can only run EF Core queries, but this query's provider is {queryable.Provider.GetType().Name}.");
+        }
+
+        // EF Core gives each DbContext its own query provider, which runs the query on that context
+        if (!ReferenceEquals(provider, context.GetService<IAsyncQueryProvider>()))
+        {
+            throw new InvalidOperationException(
+                $"BatchedQuery can only run queries of the {context.GetType().Name} it was created for, but this query belongs to another DbContext.");
+        }
+
+        return provider;
+    }
 }
 
 internal sealed class QueuedQuery<T, TResult> : QueuedQuery
@@ -56,18 +75,7 @@ internal sealed class QueuedQuery<T, TResult> : QueuedQuery
     public QueuedQuery(DbContext context, IQueryable<T> queryable, bool preparedWhileRetrying,
         Func<IAsyncEnumerable<T>, CancellationToken, Task<TResult>> read)
     {
-        if (queryable.Provider is not IAsyncQueryProvider provider)
-        {
-            throw new InvalidOperationException(
-                $"BatchedQuery can only run EF Core queries, but this query's provider is {queryable.Provider.GetType().Name}.");
-        }
-
-        // EF Core gives each DbContext its own query provider, which runs the query on that context
-        if (!ReferenceEquals(provider, context.GetService<IAsyncQueryProvider>()))
-        {
-            throw new InvalidOperationException(
-                $"BatchedQuery can only run queries of the {context.GetType().Name} it was created for, but this query belongs to another DbContext.");
-        }
+        var provider = ProviderOf(context, queryable);
 
         _context = context;
         _read = read;

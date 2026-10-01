@@ -181,6 +181,85 @@ public class batch_query_materialization_tests: IAsyncLifetime
     }
 
     [Fact]
+    public async Task a_count_and_a_page_run_in_one_round_trip()
+    {
+        await using var context = CreateContext();
+        await using var batch = context.CreateBatchQuery();
+
+        var orders = context.Orders.Where(x => x.ShippingAddress.City == "Oslo");
+        var total = batch.QueryCount(orders);
+        var page = batch.Query(orders.OrderBy(x => x.Customer).Skip(1).Take(1));
+
+        _roundTrips.Reset();
+        await batch.ExecuteAsync();
+
+        _roundTrips.Count.ShouldBe(1);
+        (await total).ShouldBe(2);
+        (await page).Single().Id.ShouldBe(_otherOrderId);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task a_count_counts_what_the_query_returns(bool batching)
+    {
+        await using var context = CreateContext(batching);
+        await using var batch = context.CreateBatchQuery();
+
+        var all = batch.QueryCount(context.Orders.Include(x => x.Lines));
+        var none = batch.QueryCount(context.Orders.Where(x => x.Customer == "nobody"));
+        var paged = batch.QueryCount(context.Orders.OrderBy(x => x.Customer).Skip(1).Take(5));
+        var lines = batch.QueryCount(context.Orders.SelectMany(x => x.Lines));
+        var groups = batch.QueryCount(context.Orders.GroupBy(x => x.ShippingAddress.City));
+
+        // A NULL is one of the distinct values, as Distinct().CountAsync() counts it
+        var distinctWithNull = batch.QueryCount(context.Orders.Select(x => x.Customer == "c" ? null : x.Customer).Distinct());
+
+        await batch.ExecuteAsync();
+
+        (await all).ShouldBe(2);
+        (await none).ShouldBe(0);
+        (await paged).ShouldBe(1);
+        (await lines).ShouldBe(4);
+        (await groups).ShouldBe(1);
+        (await distinctWithNull).ShouldBe(2);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task a_counts_captured_values_are_read_once_when_it_is_queued(bool batching)
+    {
+        await using var context = CreateContext(batching);
+        await using var batch = context.CreateBatchQuery();
+
+        var filter = new CountingFilter();
+        string? customer = "c";
+        var byFilter = batch.QueryCount(context.Orders.Where(x => x.Customer == filter.Customer));
+        var byVariable = batch.QueryCount(context.Orders.Where(x => x.Customer == customer));
+        customer = null;
+
+        await batch.ExecuteAsync();
+
+        (await byFilter).ShouldBe(1);
+        (await byVariable).ShouldBe(1);
+        filter.CustomerReads.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task a_count_of_another_context_or_of_objects_throws_when_queued()
+    {
+        await using var context = CreateContext();
+        await using var other = CreateContext();
+        await using var batch = context.CreateBatchQuery();
+
+        Should.Throw<InvalidOperationException>(() => batch.QueryCount(other.Orders))
+            .Message.ShouldContain("another DbContext");
+        Should.Throw<InvalidOperationException>(() => batch.QueryCount(new[] { 1, 2 }.AsQueryable()))
+            .Message.ShouldContain("only run EF Core queries");
+    }
+
+    [Fact]
     public async Task without_the_interceptor_each_query_runs_separately_with_the_same_results()
     {
         await using var context = CreateContext(batching: false);

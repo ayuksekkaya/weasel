@@ -14,13 +14,14 @@ In benchmarks on a local SQL Server with 4 keyed lookups per handler invocation,
 
 ## API Reference
 
-`BatchedQuery` exposes three query methods. Each queues the `IQueryable<T>` and returns a `Task<T>` future that is resolved when `ExecuteAsync()` is called. EF Core prepares the query when it is queued, so the values it captures are read then, once, and a query EF Core can't translate throws right away. Results are exactly what EF Core returns for the same query, including entities with owned, complex or JSON members, `Include`s and projections.
+`BatchedQuery` exposes four query methods. Each queues the `IQueryable<T>` and returns a `Task<T>` future that is resolved when `ExecuteAsync()` is called. EF Core prepares the query when it is queued, so the values it captures are read then, once, and a query EF Core can't translate throws right away. Results are exactly what EF Core returns for the same query, including entities with owned, complex or JSON members, `Include`s and projections.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `Query<T>(IQueryable<T>)` | `Task<IReadOnlyList<T>>` | Returns all results as a list. |
 | `QuerySingle<T>(IQueryable<T>)` | `Task<T?>` | Returns the first result, or the default value (`null` for an entity) if there is none. |
-| `Scalar<T>(IQueryable<T>)` | `Task<T>` | Returns a single scalar value (e.g., from a COUNT or MAX projection), or the default value if there is none. |
+| `Scalar<T>(IQueryable<T>)` | `Task<T>` | Returns the first value of a projection (e.g., `Select(x => x.Lines.Count)`), or the default value if there is none. |
+| `QueryCount<T>(IQueryable<T>)` | `Task<int>` | Returns how many rows the query returns, as `CountAsync()` would count them. See [Counting](#counting). |
 | `ExecuteAsync(CancellationToken)` | `Task` | Sends all queued queries in one round trip and resolves every future. |
 
 The `DbContext.CreateBatchQuery()` extension method creates a new `BatchedQuery` bound to that context's connection and transaction.
@@ -126,6 +127,32 @@ await batch.ExecuteAsync();
 <sup><a href='https://github.com/JasperFx/weasel/blob/master/src/DocSamples/BatchQuerySamples.cs#L50-L62' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_efcore_batch_query_mixed' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
+## Counting
+
+`CountAsync()` runs its query as soon as it's called, so it can't join a batch, and `Scalar()` returns a row of the query, not how many there are. Use `QueryCount<T>()` instead. It counts the rows the query returns, exactly as `CountAsync()` would: `Where`, `Distinct`, `Skip` and `Take` all apply, `Include`s don't change the count, and a query with no rows counts `0`. The typical use is a page of results and the total they're drawn from, in one round trip:
+
+<!-- snippet: sample_efcore_batch_query_count -->
+<a id='snippet-sample_efcore_batch_query_count'></a>
+```cs
+await using var batch = context.CreateBatchQuery();
+
+var orders = context.Orders.Where(o => o.CustomerId == customerId);
+
+// QueryCount queues a COUNT(*) of the rows the query returns
+var totalTask = batch.QueryCount(orders);
+var pageTask = batch.Query(orders.OrderBy(o => o.Id).Skip((page - 1) * pageSize).Take(pageSize));
+
+// The count and the page in one round trip
+await batch.ExecuteAsync();
+
+var total = await totalTask;
+var currentPage = await pageTask;
+```
+<sup><a href='https://github.com/JasperFx/weasel/blob/master/src/DocSamples/BatchQuerySamples.cs#L134-L146' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_efcore_batch_query_count' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+EF Core only defers a query that returns rows, so `QueryCount()` asks EF Core for the query's own `Count()` as a scalar subquery of a single row: `SELECT (SELECT COUNT(*) FROM ...) FROM (SELECT 1 AS "Value")`.
+
 ## Lifecycle and Disposal
 
 `BatchedQuery` implements `IAsyncDisposable`. The query lifecycle has three phases:
@@ -203,7 +230,7 @@ var orders = await ordersTask;
 
 **Independence**: Each query in the batch is independent. Results from one query cannot feed into another within the same batch. If you need dependent queries, execute the first batch, await the result, then build a second batch.
 
-**Thread safety**: `BatchedQuery` is **not thread-safe**. All `Query`/`QuerySingle`/`Scalar` calls and the `ExecuteAsync` call must happen on the same async context (which is the natural pattern in request handlers and test methods).
+**Thread safety**: `BatchedQuery` is **not thread-safe**. All `Query`/`QuerySingle`/`Scalar`/`QueryCount` calls and the `ExecuteAsync` call must happen on the same async context (which is the natural pattern in request handlers and test methods).
 
 **Transaction awareness**: If the `DbContext` has an active transaction (`Database.CurrentTransaction`), the batch executes within that transaction.
 

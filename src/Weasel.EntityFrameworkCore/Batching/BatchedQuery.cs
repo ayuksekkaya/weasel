@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data.Common;
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -72,6 +73,33 @@ public sealed class BatchedQuery : IAsyncDisposable
         return enqueue(queryable, async (results, ct) => (await firstOrDefaultAsync(results, ct).ConfigureAwait(false))!);
     }
 
+    /// <summary>
+    ///     Queues a count of the rows the query returns, as <c>CountAsync()</c> would count them.
+    ///     <c>CountAsync()</c> itself runs at once, so it can't join the batch.
+    /// </summary>
+    public Task<int> QueryCount<T>(IQueryable<T> queryable)
+    {
+        // The count is composed into another query, which can't check where this one came from
+        QueuedQuery.ProviderOf(_context, queryable);
+
+        // EF Core only defers a query that returns rows, so select its own Count() from a single row:
+        // SELECT (SELECT COUNT(*) FROM ...) FROM (SELECT 1 AS "Value"). Rewriting the query as a
+        // GroupBy instead counts a nullable column of a Distinct() query without its NULLs.
+        var count = Expression.Call(typeof(Queryable), nameof(Queryable.Count), [typeof(T)], queryable.Expression);
+        var selector = Expression.Lambda<Func<int, int>>(count, Expression.Parameter(typeof(int), "_"));
+
+        return Scalar(_context.Database.SqlQueryRaw<int>(singleRowSql()).Select(selector));
+    }
+
+    private string singleRowSql()
+    {
+        // A scalar SqlQuery is composed through a column named Value
+        var sql = $"SELECT 1 AS {_context.GetService<ISqlGenerationHelper>().DelimitIdentifier("Value")}";
+
+        // Oracle before 23ai can't SELECT without a FROM
+        return _context.Database.ProviderName == "Oracle.EntityFrameworkCore" ? sql + " FROM DUAL" : sql;
+    }
+
     // The batch runs exactly the queued query's SQL, so the first result comes from reading that
     // query's results rather than from FirstOrDefaultAsync(), whose SQL would differ (LIMIT 1).
     // Stopping after the first result also leaves the rest untracked, as FirstOrDefaultAsync() would.
@@ -101,8 +129,8 @@ public sealed class BatchedQuery : IAsyncDisposable
     /// <summary>
     ///     Executes all queued queries in the order they were queued, in a single database round trip
     ///     when possible. After this call, all <see cref="Task{T}" /> futures returned by
-    ///     <see cref="Query{T}" />, <see cref="QuerySingle{T}" />, and
-    ///     <see cref="Scalar{T}" /> are resolved.
+    ///     <see cref="Query{T}" />, <see cref="QuerySingle{T}" />, <see cref="Scalar{T}" />, and
+    ///     <see cref="QueryCount{T}" /> are resolved.
     /// </summary>
     public async Task ExecuteAsync(CancellationToken ct = default)
     {
